@@ -175,9 +175,9 @@ def main(data_path, output_folder, batch_size, num_epochs, lr_rate, lr_decay, nu
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Physics Net Training")
     parser.add_argument("--data_path",type=str,default='data/8_layer_tio2') # Where the data file is. Note: This assumes a file of _val.csv and .csv 
-    parser.add_argument("--output_folder",type=str,default='test_results1') #Where to output the results to. Note: No / at the end. 
+    parser.add_argument("--output_folder",type=str,default='results/test1') #Where to output the results to. Note: No / at the end. 
     parser.add_argument("--batch_size",type=int,default=64) # Batch Size
-    parser.add_argument("--num_epochs",type=int,default=1000) #Max number of epochs to consider at maximum, if patience condition is not met. 
+    parser.add_argument("--num_epochs",type=int,default=10) #Max number of epochs to consider at maximum, if patience condition is not met. 
     parser.add_argument("--lr_rate",type=float,default=.001) # Learning Rate. 
     parser.add_argument("--lr_decay",type=float,default=.999) # Learning rate decay. It decays by this factor every epoch.
     parser.add_argument("--num_layers",type=int,default=4) # Number of layers in the network. 
