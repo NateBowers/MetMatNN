@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Input, Dropout
-from tensorflow.keras.optimizers import RMSprop, Adam
-from tensorflow.keras.losses import MeanAbsoluteError
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.initializers import glorot_normal
 from tensorboard.plugins.hparams import api as hp
 from ray import tune
@@ -19,9 +19,8 @@ import shutil
 
 # Initialize Constants
 RANDOM_SEED = 42
-METRICS = ['accuracy', 'MeanAbsolutePercentageError']
+METRICS = ['MeanSquaredError', 'RootMeanSquaredError', 'MeanAbsoluteError', 'MeanAbsolutePercentageError']
 
-# Helper Functions
 def load_data(data_path:str, percent_test=0.2):
     # creates file paths and loads the data
     path_x = data_path+"_val.csv"
@@ -43,7 +42,7 @@ def load_data(data_path:str, percent_test=0.2):
     test_y = tf.convert_to_tensor(test_y, dtype=tf.float32)
     return train_x, val_x, test_x, train_y, val_y, test_y, stats
 
-def plot_vs_epoch(name, output_folder, values1, values2=None, compare=False):
+def plot_vs_epoch(name, output_folder, values1, values2=None, compare=False, display=False):
     path = str(output_folder + '/figures')
     name =  name.capitalize()
     save_path = os.path.join(path, name)
@@ -61,7 +60,8 @@ def plot_vs_epoch(name, output_folder, values1, values2=None, compare=False):
         plt.legend()
     plt.title(name)
     plt.savefig(save_path)
-    plt.show()
+    if display:
+        plt.show()
     return
 
 def save_json(data, name, output_folder):
@@ -71,40 +71,60 @@ def save_json(data, name, output_folder):
     print("saved " + str(name) + '.json at ' + str(output_folder))
     return
 
-def make_model(input_shape, output_shape, config):
-    model = Sequential()
+def train_model(train_x, val_x, test_x, train_y, val_y, test_y, config):
+    # Setting variables/initialization
+    input_shape, output_shape = train_x.shape, train_y.shape
     initializer = glorot_normal(RANDOM_SEED)
+
+    # Model definition
+    model = Sequential()
+    # First layer
     model.add(Input(shape=(input_shape[1])))
+    # Hidden layers
     for i in range(config['num_hidden']):
         nodes_call = 'num_nodes' + str(i)
         dropout_call = 'dropout_rate' + str(i)
-        model.add(Dense(config[nodes_call], activation='relu', kernel_initializer=initializer))
+        model.add(Dense(
+            config[nodes_call], 
+            activation='relu', 
+            kernel_initializer=initializer,
+        ))
         model.add(Dropout(config[dropout_call]))
+    # Output layer
     model.add(Dense(output_shape[1]))
-    model.compile(optimizer=Adam(learning_rate=config['lr']), loss=MeanAbsoluteError(), metrics=METRICS)
+    model.compile(
+        optimizer=Adam(learning_rate=config['lr']), 
+        loss=MeanSquaredError(), 
+        metrics=METRICS,
+    )
     print(model.summary())
-    return model
+    print("Starting training")
+    # Train model
+    start_time = time.time()
+    history = model.fit(
+        train_x, 
+        train_y, 
+        epochs=config['num_epochs'],
+        batch_size=config['batch_size'], 
+        validation_data=(val_x, val_y), 
+        verbose=2,
+    )
+    scores = model.evaluate(test_x, test_y, return_dict=True)
+    print("Finished training")
+    print("Training time: " + str(time.time()-start_time))
 
+    return model, history, scores
 
 def main(config, data_path, output_folder):
-    # Clear existing output and prepare data
+    # Clear existing output
     if os.path.exists(output_folder):
         shutil.rmtree(output_folder)
+    
+    # Load data
     train_x, val_x, test_x, train_y, val_y, test_y, stats = load_data(data_path)
-    input_shape, output_shape = train_x.shape, train_y.shape
 
-    # Make and train model
-    model = make_model(input_shape, output_shape, config)
-    history = model.fit(train_x, 
-                        train_y, 
-                        epochs=config['num_epochs'],
-                        batch_size=config['batch_size'], 
-                        validation_data=(val_x, val_y), 
-                        verbose=1
-                        )
-    scores = model.evaluate(test_x, test_y, return_dict=True)
-    print("Completed training")
-    print(model.summary())
+    # Train model
+    model, history, scores = train_model(train_x, val_x, test_x, train_y, val_y, test_y, config)
 
     # Save training info 
     model.save(os.path.join(output_folder, 'model'))
@@ -118,11 +138,8 @@ def main(config, data_path, output_folder):
     input_val = tf.reshape(test_x[0], shape=[1, test_x.shape[1]])
     predicted = model.predict(input_val).flatten()
     actual = test_y[0].numpy().flatten()
-    plot_vs_epoch('Cross sectional scattering', output_folder, predicted, actual, compare=True)
+    plot_vs_epoch('Cross sectional scattering', output_folder, predicted, actual, compare=True, display=True)
     return model
-
-
-
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Physics Net Training")
@@ -133,19 +150,34 @@ if __name__=="__main__":
     dict = vars(args)
 
     # Hyperparameters (used for tuning)
+    # config = {
+    #     'lr': tune.uniform(0.0001,0.1),
+    #     'batch_size': tune.qrandint(16, 128, 16),
+    #     'num_epochs': 10,
+    #     'num_hidden': tune.randint(1,5), # the upper limit is exclusive, so options are (1,2,3,4)
+    #     'num_nodes0': tune.qrandint(64, 320, 64),
+    #     'num_nodes1': tune.qrandint(64, 320, 64),
+    #     'num_nodes2': tune.qrandint(64, 320, 64),
+    #     'num_nodes3': tune.qrandint(64, 320, 64),
+    #     'dropout_rate0': tune.quniform(0.3, 0.8, 0.1),
+    #     'dropout_rate1': tune.quniform(0.3, 0.8, 0.1),
+    #     'dropout_rate2': tune.quniform(0.3, 0.8, 0.1),
+    #     'dropout_rate3': tune.quniform(0.3, 0.8, 0.1),
+    # }
+
     config = {
         'lr': 0.001,
         'batch_size': 64,
-        'num_epochs': 10,
-        'num_hidden': 4,
+        'num_epochs': 100,
+        'num_hidden': 3,
         'num_nodes0': 256,
         'num_nodes1': 256,
         'num_nodes2': 256,
         'num_nodes3': 256,
-        'dropout_rate0': 0.2,
-        'dropout_rate1': 0.2,
-        'dropout_rate2': 0.2,
-        'dropout_rate3': 0.2,
+        'dropout_rate0': 0.3,
+        'dropout_rate1': 0.3,
+        'dropout_rate2': 0.3,
+        'dropout_rate3': 0.3,
     }
         
     kwargs = {  
