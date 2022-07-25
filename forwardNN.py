@@ -12,6 +12,7 @@ from tensorflow.keras.initializers import glorot_normal
 from ray import tune
 from ray.tune.schedulers import AsyncHyperBandScheduler
 from ray.tune.integration.keras import TuneReportCallback
+from ray.tune.suggest.hyperopt import HyperOptSearch
 import os
 import json
 import argparse
@@ -24,10 +25,12 @@ import shutil
 # HP_CONFIG dict is the hyperparameter space searched when tuning the network
 RANDOM_SEED = 42
 METRICS = [
+    'MeanSquaredError',
     'MeanAbsoluteError', 
     'MeanAbsolutePercentageError'
 ]
 CONFIG = {
+    'tuning': False,
     'lr': 0.001,
     'batch_size': 64,
     'num_epochs': 2,
@@ -42,9 +45,10 @@ CONFIG = {
     'dropout_rate3': 0.3,
 }
 HP_CONFIG = {
+    'tuning': True,
     'lr': tune.uniform(0.0001,0.1),
     'batch_size': tune.qrandint(16, 128, 16),
-    'num_epochs': 150,
+    'num_epochs': 100,
     'num_hidden': tune.randint(1,5), # the upper limit is exclusive, so options are (1,2,3,4)
     'num_nodes0': tune.qrandint(64, 320, 64),
     'num_nodes1': tune.qrandint(64, 320, 64),
@@ -124,15 +128,16 @@ def save_json(data, name, output_path):
     filename = str(output_path + '/' + name + '.json')
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'w') as f:
-        json.dump(data, f, indent=4)
+        json.dump(data, f, indent=4) 
 
-def train_model(config, data, tuning=False):
+def train_model(config):
+    data = config['data']
+    tuning = config['tuning']
+    if not tuning:
+        config['num_epochs'] = 150
+
     input_shape, output_shape = data.train_x.shape, data.train_y.shape
     initializer = glorot_normal(RANDOM_SEED)
-    if tuning:
-        callbacks = [TuneReportCallback({"mean_squared_error": "mean_squared_error"})]
-    else:
-        callbacks = []
 
     model = Sequential()
     model.add(Input(shape=(input_shape[1])))
@@ -158,57 +163,62 @@ def train_model(config, data, tuning=False):
         epochs=config['num_epochs'],
         batch_size=config['batch_size'], 
         validation_data=(data.val_x, data.val_y), 
-        verbose=2,
-        callbacks=callbacks,
+        verbose=0,
+        callbacks=[TuneReportCallback({"mse": "mean_squared_error"})],
     )
 
     if not tuning:
         return model, history
 
-def tune_model(config, data):
-    # sched = AsyncHyperBandScheduler(
-    #     time_attr="training_iteration", max_t=400, grace_period=20
-    # )
+def tune_model(config, output_path):
+    config.update({'tuning':True})
+    save_path = os.path.abspath(output_path)
+
+    sched = AsyncHyperBandScheduler(
+        time_attr="training_iteration",
+        max_t=100,
+        grace_period=10,
+    )
 
     analysis = tune.run(
-        train_model(data, tuning=True),
+        train_model,
         name="exp",
-        scheduler="AsyncHyperBand",
-        metric="mean_squared_error",
+        scheduler=sched,
+        search_alg=HyperOptSearch(random_state_seed=RANDOM_SEED),
+        metric="mse",
         mode="min",
         stop={"mean_squared_error": 0.01},
-        num_samples=100,
-        # resources_per_trial={"cpu": 2, "gpu": 0},
-        config=config
+        num_samples=1,
+        local_dir=save_path,
+        config=config,
+        verbose=0,
     )
-    print("Best hyperparameters found were: ", analysis.best_config)
-    return analysis
-
+    return analysis.best_config
 
 def main(config, x_path, y_path, output_path):
-    # Initialize data
-    # Tune (ideally use parallel computing to speed up)
-    # Save performance info (but NOT graphs and stuff
-    # Use best config to run final thing
-    # Save data
-    
-
     if os.path.exists(output_path):
         shutil.rmtree(output_path)
 
     data = TrainingData(x_path, y_path)
     data.save_stats(output_path)
 
-    model, history = train_model(config, data)
+    config.update({'data':data})
+
+    best_config = tune_model(config, output_path)
+    best_config.update({'tuning':False})
+
+    model, history = train_model(best_config)
     scores = model.evaluate(data.test_x, data.test_y, return_dict=True)
 
     model.save(os.path.join(output_path, 'model'))
+    save_config = best_config.copy()
+    save_config.pop('data')
+    save_json(save_config, 'best_config', output_path)
     save_json(history.history, 'histories', output_path)
     save_json(scores, 'scores', output_path)
     for key in history.history:
         plot_vs_epoch(key, output_path, history.history[key])
         
-    # Plot example prediction
     input_val = tf.reshape(data.test_x[0], shape=[1, data.test_x.shape[1]])
     predicted = model.predict(input_val).flatten()
     actual = data.test_y[0].numpy().flatten()
@@ -219,15 +229,15 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--x_path",type=str,default='data/8_layer_tio2_val.csv')
     parser.add_argument("--y_path",type=str,default='data/8_layer_tio2.csv')
-    parser.add_argument("--output_path",type=str,default='results/test1')
+    parser.add_argument("--output_path",type=str,default='results')
 
     args = parser.parse_args()
-    dict = vars(args)
+    arg_dict = vars(args)
 
     kwargs = {  
-        'x_path':dict['x_path'],
-        'y_path':dict['y_path'],
-        'output_path':dict['output_path'],
+        'x_path':arg_dict['x_path'],
+        'y_path':arg_dict['y_path'],
+        'output_path':arg_dict['output_path'],
     }
 
-    main(config=CONFIG, **kwargs)
+    main(config=HP_CONFIG, **kwargs)
