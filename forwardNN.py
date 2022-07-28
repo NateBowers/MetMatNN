@@ -46,18 +46,20 @@ CONFIG = {
 }
 HP_CONFIG = {
     'tuning': True,
-    'lr': tune.uniform(0.0001,0.1),
-    'batch_size': tune.qrandint(16, 128, 16),
+    'lr': tune.uniform(0.0001,0.01),
+    'batch_size': tune.qrandint(32, 256, 32),
     'num_epochs': 100,
-    'num_hidden': tune.randint(1,5), # the upper limit is exclusive, so options are (1,2,3,4)
-    'num_nodes0': tune.qrandint(64, 320, 64),
-    'num_nodes1': tune.qrandint(64, 320, 64),
-    'num_nodes2': tune.qrandint(64, 320, 64),
-    'num_nodes3': tune.qrandint(64, 320, 64),
+    'num_hidden': tune.choice([3, 4, 5]),
+    'num_nodes0': tune.choice([128, 192, 256, 320]),
+    'num_nodes1': tune.choice([128, 192, 256, 320]),
+    'num_nodes2': tune.choice([128, 192, 256, 320]),
+    'num_nodes3': tune.choice([128, 192, 256, 320]),
+    'num_nodes4': tune.choice([128, 192, 256, 320]),
     'dropout_rate0': tune.quniform(0.3, 0.8, 0.1),
     'dropout_rate1': tune.quniform(0.3, 0.8, 0.1),
     'dropout_rate2': tune.quniform(0.3, 0.8, 0.1),
     'dropout_rate3': tune.quniform(0.3, 0.8, 0.1),
+    'dropout_rate4': tune.quniform(0.3, 0.8, 0.1),
 }
 
 
@@ -176,8 +178,8 @@ def tune_model(config, output_path):
 
     sched = AsyncHyperBandScheduler(
         time_attr="training_iteration",
-        max_t=100,
-        grace_period=10,
+        max_t=2000,
+        grace_period=100,
     )
 
     analysis = tune.run(
@@ -187,10 +189,10 @@ def tune_model(config, output_path):
         search_alg=HyperOptSearch(random_state_seed=RANDOM_SEED),
         metric="mse",
         mode="min",
-        stop={"mean_squared_error": 0.01},
-        num_samples=1,
+        stop={"mse": 0.01},
+        num_samples=2000,
         local_dir=save_path,
-        config=config,
+        config=config,  
         verbose=0,
     )
     return analysis.best_config
@@ -202,7 +204,7 @@ def main(config, x_path, y_path, output_path):
     data = TrainingData(x_path, y_path)
     data.save_stats(output_path)
 
-    config.update({'data':data})
+    config.update({'data':data}) # Bundle data with config dict to pass into model while tuning
 
     best_config = tune_model(config, output_path)
     best_config.update({'tuning':False})
