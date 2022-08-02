@@ -1,109 +1,23 @@
 # Written and tested in Python 3.10.4
 # See requirements.txt for the versions of packages needed
 
-import tensorflow as tf
 import numpy as np
+import tensorflow as tf
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Input, Dropout
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.initializers import glorot_normal
-from ray import tune
-from ray.tune.schedulers import AsyncHyperBandScheduler
-from ray.tune.integration.keras import TuneReportCallback
-from ray.tune.suggest.hyperopt import HyperOptSearch
 import os
 import json
-import argparse
 import shutil
+import argparse
+from sklearn.model_selection import train_test_split
+from tensorflow import keras
+from tensorflow.keras import layers
+import keras_tuner as kt
 
-# Initialize Constants
-# RANDOM_SEED is a random number used to make results replicable
-# METRICS are the different error functions tracked
-# CONFIG dict is the hyperparameters of the network
-# HP_CONFIG dict is the hyperparameter space searched when tuning the network
 RANDOM_SEED = 42
 METRICS = [
     'MeanSquaredError',
-    'MeanAbsoluteError', 
-    'MeanAbsolutePercentageError'
+    'MeanAbsolutePercentageError',
 ]
-CONFIG = {
-    'tuning': False,
-    'lr': 0.001,
-    'batch_size': 64,
-    'num_epochs': 2,
-    'num_hidden': 3,
-    'num_nodes0': 256,
-    'num_nodes1': 256,
-    'num_nodes2': 256,
-    'num_nodes3': 256,
-    'dropout_rate0': 0.3,
-    'dropout_rate1': 0.3,
-    'dropout_rate2': 0.3,
-    'dropout_rate3': 0.3,
-}
-HP_CONFIG = {
-    'tuning': True,
-    'lr': tune.uniform(0.0001,0.01),
-    'batch_size': tune.qrandint(32, 256, 32),
-    'num_epochs': 100,
-    'num_hidden': tune.choice([3, 4, 5]),
-    'num_nodes0': tune.choice([128, 192, 256, 320]),
-    'num_nodes1': tune.choice([128, 192, 256, 320]),
-    'num_nodes2': tune.choice([128, 192, 256, 320]),
-    'num_nodes3': tune.choice([128, 192, 256, 320]),
-    'num_nodes4': tune.choice([128, 192, 256, 320]),
-    'dropout_rate0': tune.quniform(0.3, 0.8, 0.1),
-    'dropout_rate1': tune.quniform(0.3, 0.8, 0.1),
-    'dropout_rate2': tune.quniform(0.3, 0.8, 0.1),
-    'dropout_rate3': tune.quniform(0.3, 0.8, 0.1),
-    'dropout_rate4': tune.quniform(0.3, 0.8, 0.1),
-}
-
-
-class TrainingData:
-    def __init__(self, path_x, path_y, percent_test=0.4):
-        path_x = os.path.abspath(path_x)
-        path_y = os.path.abspath(path_y)
-
-        data_x = np.genfromtxt(path_x, delimiter=',', dtype='float32')
-        data_y = np.genfromtxt(path_y, delimiter=',', dtype='float32')
-
-        if data_x.shape[0] == data_y.shape[0]:
-            pass
-        elif data_x.shape[0] == data_y.shape[1] or data_x.shape[1] == data_y.shape[0]:
-            data_y = np.transpose(data_y)
-        else:
-            raise Exception("x and y data arrays do not share a common dimension.")
-
-        mean, std = data_x.mean(), data_x.std()
-        data_x = (data_x-mean)/std
-
-        self.mean = mean
-        self.std = std
-
-        self.data_x = data_x
-        self.data_y = data_y
-
-        train_x, test_x, train_y, test_y = train_test_split(self.data_x, self.data_y, test_size=float(percent_test),random_state=RANDOM_SEED)
-        val_x, test_x, val_y, test_y = train_test_split(test_x, test_y, test_size=0.5,random_state=RANDOM_SEED)
-
-        self.train_x = self.convert(train_x)
-        self.train_y = self.convert(train_y)
-        self.val_x = self.convert(val_x)
-        self.val_y = self.convert(val_y)
-        self.test_x = self.convert(test_x)
-        self.test_y = self.convert(test_y)
-
-    def convert(self, arr):
-        tensor = tf.convert_to_tensor(arr, dtype=tf.float32)
-        return tensor
-
-    def save_stats(self, path):
-        stats = {'mean':float(self.mean), 'std':float(self.std)}
-        save_json(stats, 'stats', path)
 
 def plot_vs_epoch(name, output_path, values1, values2=None, compare=False, display=False):
     plt.close()
@@ -132,90 +46,112 @@ def save_json(data, name, output_path):
     with open(filename, 'w') as f:
         json.dump(data, f, indent=4) 
 
-def train_model(config):
-    data = config['data']
-    tuning = config['tuning']
-    if not tuning:
-        config['num_epochs'] = 150
+class TrainingData:
+    def __init__(self, path_x, path_y, percent_test=0.2):
+        data_x = np.genfromtxt(path_x, delimiter=',', dtype='float32')
+        data_y = np.genfromtxt(path_y, delimiter=',', dtype='float32')
 
-    input_shape, output_shape = data.train_x.shape, data.train_y.shape
-    initializer = glorot_normal(RANDOM_SEED)
+        if data_x.shape[0] == data_y.shape[0]:
+            pass
+        elif data_x.shape[0] == data_y.shape[1] or data_x.shape[1] == data_y.shape[0]:
+            data_y = np.transpose(data_y)
+        else:
+            raise Exception("x and y data arrays do not share a common dimension.")
 
-    model = Sequential()
-    model.add(Input(shape=(input_shape[1])))
-    for i in range(int(config['num_hidden'])):
-        nodes_call = 'num_nodes' + str(i)
-        dropout_call = 'dropout_rate' + str(i)
-        model.add(Dense(
-            config[nodes_call], 
-            activation='relu', 
-            kernel_initializer=initializer,
-        ))
-        model.add(Dropout(config[dropout_call]))
-    model.add(Dense(output_shape[1]))
-    model.compile(
-        optimizer=Adam(learning_rate=config['lr']), 
-        loss='mean_squared_error', 
-        metrics=METRICS,
-    )
+        mean, std = data_x.mean(), data_x.std()
+        data_x = (data_x-mean)/std
 
-    history = model.fit(
-        data.train_x, 
-        data.train_y, 
-        epochs=config['num_epochs'],
-        batch_size=config['batch_size'], 
-        validation_data=(data.val_x, data.val_y), 
-        verbose=0,
-        callbacks=[TuneReportCallback({"mse": "mean_squared_error"})],
-    )
+        self.mean = mean
+        self.std = std
 
-    if not tuning:
-        return model, history
+        train_x, test_x, train_y, test_y = train_test_split(data_x, data_y, test_size=float(percent_test),random_state=RANDOM_SEED)
 
-def tune_model(config, output_path):
-    config.update({'tuning':True})
-    save_path = os.path.abspath(output_path)
+        self.train_x = self.convert(train_x)
+        self.train_y = self.convert(train_y)
+        self.test_x = self.convert(test_x)
+        self.test_y = self.convert(test_y)
 
-    sched = AsyncHyperBandScheduler(
-        time_attr="training_iteration",
-        max_t=2000,
-        grace_period=100,
-    )
+    def convert(self, arr):
+        tensor = tf.convert_to_tensor(arr, dtype=tf.float32)
+        return tensor
 
-    analysis = tune.run(
-        train_model,
-        name="exp",
-        scheduler=sched,
-        search_alg=HyperOptSearch(random_state_seed=RANDOM_SEED),
-        metric="mse",
-        mode="min",
-        stop={"mse": 0.01},
-        num_samples=2000,
-        local_dir=save_path,
-        config=config,  
-        verbose=0,
-    )
-    return analysis.best_config
+    def save_stats(self, path):
+        stats = {'mean':float(self.mean), 'std':float(self.std)}
+        save_json(stats, 'stats', path)
 
-def main(config, x_path, y_path, output_path):
+    def IO_shape(self):
+        input_shape = self.train_x.shape[1]
+        output_shape = self.train_y.shape[1]
+        return (input_shape, output_shape)
+
+
+class ModelTuner(kt.HyperModel):
+    def __init__ (self, input_shape, output_shape):
+        self.input_shape = input_shape
+        self.output_shape = output_shape
+
+    def build(self, hp):
+        model = keras.Sequential()
+        model.add(layers.Input(shape=self.input_shape))
+        for i in range(4):
+            model.add(
+                layers.Dense(
+                    units=hp.Int(f"units_{i}", min_value=128, max_value=512, step=32),
+                    activation=hp.Choice(f"activation_{i}", ["relu", "selu"]),
+                )
+            )
+        model.add(layers.Dense(units=self.output_shape))
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=hp.Float("lr", min_value=0.0001, max_value=0.01, step=0.0001)),
+            loss='mean_squared_error',
+            metrics=METRICS,
+        )
+        return model
+
+    def fit(self, hp, model, data, num_epochs, val_percent=0.2, **kwargs):
+        return model.fit(
+            x=data.train_x,
+            y=data.train_y,
+            batch_size=hp.Int("batch_size", min_value=32, max_value=128, step=16),
+            epochs=num_epochs,
+            verbose=0,
+            validation_split=val_percent,
+        )
+
+def main(x_path, y_path, output_path, num_epochs):
     if os.path.exists(output_path):
         shutil.rmtree(output_path)
 
     data = TrainingData(x_path, y_path)
     data.save_stats(output_path)
+    (input_shape, output_shape) = data.IO_shape()
 
-    config.update({'data':data}) # Bundle data with config dict to pass into model while tuning
+    tuner = kt.BayesianOptimization(
+        ModelTuner(input_shape=input_shape, output_shape=output_shape),
+        objective=kt.Objective("val_mean_squared_error", direction="min"),        
+        max_trials=100,
+        executions_per_trial=1,
+        directory=output_path,
+        project_name='Tune_MetMatNN',
+    )
 
-    best_config = tune_model(config, output_path)
-    best_config.update({'tuning':False})
+    tuner.search( 
+        data=data,
+        num_epochs=num_epochs,
+    )
 
-    model, history = train_model(best_config)
+    tuner.results_summary()
+
+    hpmodel = ModelTuner(input_shape, output_shape)
+    best_hp = tuner.get_best_hyperparameters()[0]
+    print(type(tuner.results_summary()))
+    model = hpmodel.build(best_hp)
+    history = hpmodel.fit(best_hp, model, data, num_epochs=1, val_percent=0)
+
+    print(model.summary)
     scores = model.evaluate(data.test_x, data.test_y, return_dict=True)
 
     model.save(os.path.join(output_path, 'model'))
-    save_config = best_config.copy()
-    save_config.pop('data')
-    save_json(save_config, 'best_config', output_path)
     save_json(history.history, 'histories', output_path)
     save_json(scores, 'scores', output_path)
     for key in history.history:
@@ -227,11 +163,12 @@ def main(config, x_path, y_path, output_path):
     plot_vs_epoch('Cross sectional scattering', output_path, predicted, actual, compare=True, display=True)
 
 
-if __name__=="__main__":
+if __name__=="__main__":    
     parser = argparse.ArgumentParser()
     parser.add_argument("--x_path",type=str,default='data/8_layer_tio2_val.csv')
     parser.add_argument("--y_path",type=str,default='data/8_layer_tio2.csv')
     parser.add_argument("--output_path",type=str,default='results')
+    parser.add_argument("--num_epochs",type=int,default='50')
 
     args = parser.parse_args()
     arg_dict = vars(args)
@@ -240,6 +177,7 @@ if __name__=="__main__":
         'x_path':arg_dict['x_path'],
         'y_path':arg_dict['y_path'],
         'output_path':arg_dict['output_path'],
+        'num_epochs':arg_dict['num_epochs'],
     }
 
-    main(config=HP_CONFIG, **kwargs)
+    main(**kwargs)
